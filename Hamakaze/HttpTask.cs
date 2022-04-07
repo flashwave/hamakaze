@@ -131,7 +131,7 @@ namespace Hamakaze {
                     try {
                         Request.WriteTo(Connection.Stream, (p, t) => OnUploadProgress?.Invoke(this, p, t));
                         break;
-                    } catch(IOException ex) {
+                    } catch(HttpRequestMessageStreamException ex) {
                         Connection.Dispose();
                         Connection = Connections.GetConnection(Request.Host, endPoint, Request.IsSecure);
 
@@ -162,7 +162,8 @@ namespace Hamakaze {
                 return;
             }
 
-            if(Response.Connection == HttpConnectionHeader.CLOSE)
+            if(Response.Connection == HttpConnectionHeader.CLOSE
+                || Response.ProtocolVersion.CompareTo(@"1.1") < 0)
                 Connection.Dispose();
             if(Response == null)
                 Error(new HttpTaskRequestFailedException());

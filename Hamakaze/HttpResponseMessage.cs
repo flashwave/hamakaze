@@ -127,7 +127,7 @@ namespace Hamakaze {
                 for(; ; ) {
                     byt = stream.ReadByte();
                     if(byt == -1 && ms.Length == 0)
-                        return null;
+                        throw new IOException(@"readLine: There is no data.");
 
                     ms.WriteByte((byte)byt);
 

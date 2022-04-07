@@ -12,6 +12,13 @@ namespace Hamakaze {
         public HttpConnectionManagerLockException() : base(@"Failed to lock the connection manager in time.") { }
     }
 
+    public class HttpRequestMessageException : HttpException {
+        public HttpRequestMessageException(string message) : base(message) { }
+    }
+    public class HttpRequestMessageStreamException : HttpRequestMessageException {
+        public HttpRequestMessageStreamException() : base(@"Provided Stream is not writable.") { }
+    }
+
     public class HttpTaskException : HttpException {
         public HttpTaskException(string message) : base(message) { }
     }

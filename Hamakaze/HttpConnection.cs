@@ -4,7 +4,6 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
-using System.Threading;
 
 namespace Hamakaze {
     public class HttpConnection : IDisposable {
@@ -18,9 +17,9 @@ namespace Hamakaze {
         public string Host { get; }
         public bool IsSecure { get; }
 
-        public bool HasTimedOut => MaxRequests == 0 || (DateTimeOffset.Now - LastOperation) > MaxIdle;
+        public bool HasTimedOut => MaxRequests < 1 || (DateTimeOffset.Now - LastOperation) > MaxIdle;
 
-        public int MaxRequests { get; set; } = -1;
+        public int? MaxRequests { get; set; } = null;
         public TimeSpan MaxIdle { get; set; } = TimeSpan.MaxValue;
         public DateTimeOffset LastOperation { get; private set; } = DateTimeOffset.Now;
 
@@ -45,14 +44,19 @@ namespace Hamakaze {
             if(IsSecure) {
                 SslStream = new SslStream(NetworkStream, false, (s, ce, ch, e) => e == SslPolicyErrors.None, null);
                 Stream = SslStream;
-                SslStream.AuthenticateAsClient(Host, null, SslProtocols.Tls11 | SslProtocols.Tls12 | SslProtocols.Tls13, true);
+                SslStream.AuthenticateAsClient(
+                    Host,
+                    null,
+                    SslProtocols.Tls11 | SslProtocols.Tls12 | SslProtocols.Tls13,
+                    true
+                );
             } else
                 Stream = NetworkStream;
         }
 
         public void MarkUsed() {
             LastOperation = DateTimeOffset.Now;
-            if(MaxRequests > 0)
+            if(MaxRequests != null)
                 --MaxRequests;
         }
 
