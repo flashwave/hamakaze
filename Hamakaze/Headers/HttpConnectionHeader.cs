@@ -9,9 +9,10 @@ namespace Hamakaze.Headers {
 
         public const string CLOSE = @"close";
         public const string KEEP_ALIVE = @"keep-alive";
+        public const string UPGRADE = @"upgrade";
 
         public HttpConnectionHeader(string mode) {
-            Value = mode ?? throw new ArgumentNullException(nameof(mode));
+            Value = (mode ?? throw new ArgumentNullException(nameof(mode))).ToLowerInvariant();
         }
     }
 }

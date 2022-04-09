@@ -124,7 +124,7 @@ namespace Hamakaze {
                 using MemoryStream ms = new();
                 int byt; ushort lastTwo = 0;
 
-                for(; ; ) {
+                for(;;) {
                     byt = stream.ReadByte();
                     if(byt == -1 && ms.Length == 0)
                         throw new IOException(@"readLine: There is no data.");
@@ -238,11 +238,9 @@ namespace Hamakaze {
                     readBuffer(chunkLength);
                     readLine();
                 }
-                readLine();
             } else if(contentLength != 0) {
                 body = new MemoryStream();
                 readBuffer(contentLength);
-                readLine();
             }
 
             if(body != null)

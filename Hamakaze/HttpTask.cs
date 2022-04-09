@@ -1,7 +1,6 @@
 ﻿using Hamakaze.Headers;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Net;
 
@@ -25,7 +24,7 @@ namespace Hamakaze {
         private HttpConnectionManager Connections { get; }
 
         private IEnumerable<IPAddress> Addresses { get; set; }
-        private HttpConnection Connection { get; set; }
+        public HttpConnection Connection { get; private set; }
 
         public bool DisposeRequest { get; set; }
         public bool DisposeResponse { get; set; }
@@ -70,103 +69,90 @@ namespace Hamakaze {
             if(IsCancelled)
                 return false;
 
-            switch(State) {
-                case TaskState.Initial:
-                    State = TaskState.Lookup;
-                    OnStateChange?.Invoke(this, State);
-                    DoLookup();
-                    break;
-                case TaskState.Lookup:
-                    State = TaskState.Request;
-                    OnStateChange?.Invoke(this, State);
-                    DoRequest();
-                    break;
-                case TaskState.Request:
-                    State = TaskState.Response;
-                    OnStateChange?.Invoke(this, State);
-                    DoResponse();
-                    break;
-                case TaskState.Response:
-                    State = TaskState.Finished;
-                    OnStateChange?.Invoke(this, State);
-                    OnComplete?.Invoke(this, Response);
-                    if(DisposeResponse)
-                        Response?.Dispose();
-                    if(DisposeRequest)
-                        Request?.Dispose();
-                    return false;
-                default:
-                    Error(new HttpTaskInvalidStateException());
-                    return false;
+            try {
+                switch(State) {
+                    case TaskState.Initial:
+                        State = TaskState.Lookup;
+                        OnStateChange?.Invoke(this, State);
+                        DoLookup();
+                        break;
+                    case TaskState.Lookup:
+                        State = TaskState.Request;
+                        OnStateChange?.Invoke(this, State);
+                        DoRequest();
+                        break;
+                    case TaskState.Request:
+                        State = TaskState.Response;
+                        OnStateChange?.Invoke(this, State);
+                        DoResponse();
+                        break;
+                    case TaskState.Response:
+                        State = TaskState.Finished;
+                        OnStateChange?.Invoke(this, State);
+                        OnComplete?.Invoke(this, Response);
+                        if(DisposeResponse)
+                            Response?.Dispose();
+                        if(DisposeRequest)
+                            Request?.Dispose();
+                        return false;
+                    default:
+                        throw new HttpTaskInvalidStateException();
+                }
+            } catch(Exception ex) {
+                Error(ex);
+                return false;
             }
 
             return true;
         }
 
         private void DoLookup() {
-            try {
-                Addresses = Dns.GetHostAddresses(Request.Host);
-            } catch(Exception ex) {
-                Error(ex);
-                return;
-            }
+            Addresses = Dns.GetHostAddresses(Request.Host);
 
             if(!Addresses.Any())
-                Error(new HttpTaskNoAddressesException());
+                throw new HttpTaskNoAddressesException();
         }
 
         private void DoRequest() {
-            Exception exception = null;
+            Queue<IPAddress> addresses = new(Addresses);
 
-            try {
-                foreach(IPAddress addr in Addresses) {
-                    int tries = 0;
-                    IPEndPoint endPoint = new(addr, Request.Port);
+            while(addresses.TryDequeue(out IPAddress addr)) {
+                int tries = 0;
+                IPEndPoint endPoint = new(addr, Request.Port);
 
-                    exception = null;
+                Connection = Connections.GetConnection(Request.Host, endPoint, Request.IsSecure);
+
+            retry:
+                ++tries;
+                try {
+                    Request.WriteTo(Connection.Stream, (p, t) => OnUploadProgress?.Invoke(this, p, t));
+                    break;
+                } catch(HttpRequestMessageStreamException) {
+                    Connection.Dispose();
                     Connection = Connections.GetConnection(Request.Host, endPoint, Request.IsSecure);
 
-                retry:
-                    ++tries;
-                    try {
-                        Request.WriteTo(Connection.Stream, (p, t) => OnUploadProgress?.Invoke(this, p, t));
-                        break;
-                    } catch(HttpRequestMessageStreamException ex) {
-                        Connection.Dispose();
-                        Connection = Connections.GetConnection(Request.Host, endPoint, Request.IsSecure);
+                    if(tries < 2)
+                        goto retry;
 
-                        if(tries < 2)
-                            goto retry;
-
-                        exception = ex;
-                        continue;
-                    } finally {
-                        Connection.MarkUsed();
-                    }
+                    if(!addresses.Any())
+                        throw;
+                } finally {
+                    Connection.MarkUsed();
                 }
-            } catch(Exception ex) {
-                Error(ex);
             }
 
-            if(exception != null)
-                Error(exception);
-            else if(Connection == null)
-                Error(new HttpTaskNoConnectionException());
+            if(Connection == null)
+                throw new HttpTaskNoConnectionException();
         }
 
         private void DoResponse() {
-            try {
-                Response = HttpResponseMessage.ReadFrom(Connection.Stream, (p, t) => OnDownloadProgress?.Invoke(this, p, t));
-            } catch(Exception ex) {
-                Error(ex);
-                return;
-            }
+            Response = HttpResponseMessage.ReadFrom(Connection.Stream, (p, t) => OnDownloadProgress?.Invoke(this, p, t));
 
             if(Response.Connection == HttpConnectionHeader.CLOSE
                 || Response.ProtocolVersion.CompareTo(@"1.1") < 0)
                 Connection.Dispose();
             if(Response == null)
-                Error(new HttpTaskRequestFailedException());
+                throw new HttpTaskRequestFailedException();
 
             HttpKeepAliveHeader hkah = Response.Headers.Where(x => x.Name == HttpKeepAliveHeader.NAME).Cast<HttpKeepAliveHeader>().FirstOrDefault();
             if(hkah != null) {

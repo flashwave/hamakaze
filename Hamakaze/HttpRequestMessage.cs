@@ -92,7 +92,8 @@ namespace Hamakaze {
         public HttpRequestMessage(string method, Uri uri) {
             Method = method ?? throw new ArgumentNullException(nameof(method));
             RequestTarget = uri.PathAndQuery;
-            IsSecure = uri.Scheme.Equals(@"https", StringComparison.InvariantCultureIgnoreCase);
+            IsSecure = uri.Scheme.Equals(@"https", StringComparison.InvariantCultureIgnoreCase)
+                || uri.Scheme.Equals(@"wss", StringComparison.InvariantCultureIgnoreCase);
             Host = uri.Host;
             ushort defaultPort = (IsSecure ? HTTPS : HTTP);
             Port = uri.Port == -1 ? defaultPort : (ushort)uri.Port;

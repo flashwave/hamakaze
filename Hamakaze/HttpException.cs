@@ -5,6 +5,32 @@ namespace Hamakaze {
         public HttpException(string message) : base(message) { }
     }
 
+    public class HttpUpgradeException : HttpException {
+        public HttpUpgradeException(string message) : base(message) { }
+    }
+    public class HttpUpgradeProtocolVersionException : HttpUpgradeException {
+        public HttpUpgradeProtocolVersionException(string expectedVersion, string givenVersion)
+            : base($@"Server HTTP version ({givenVersion}) is lower than what is expected {expectedVersion}.") { }
+    }
+    public class HttpUpgradeUnexpectedStatusException : HttpUpgradeException {
+        public HttpUpgradeUnexpectedStatusException(int statusCode) : base($@"Expected HTTP status code 101, got {statusCode}.") { }
+    }
+    public class HttpUpgradeUnexpectedHeaderException : HttpUpgradeException {
+        public HttpUpgradeUnexpectedHeaderException(string header, string expected, string given)
+            : base($@"Unexpected {header} header value ""{given}"", expected ""{expected}"".") { }
+    }
+    public class HttpUpgradeInvalidHashException : HttpUpgradeException {
+        public HttpUpgradeInvalidHashException(string expected, string given)
+            : base($@"Server sent invalid hash ""{given}"", expected ""{expected}"".") { }
+    }
+
+    public class HttpConnectionException : HttpException {
+        public HttpConnectionException(string message) : base(message) { }
+    }
+    public class HttpConnectionAlreadyUpgradedException : HttpConnectionException {
+        public HttpConnectionAlreadyUpgradedException() : base(@"This connection has already been upgraded.") { }
+    }
+
     public class HttpConnectionManagerException : HttpException {
         public HttpConnectionManagerException(string message) : base(message) { }
     }

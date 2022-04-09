@@ -4,15 +4,14 @@ using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Authentication;
+using Hamakaze.WebSocket;
 
 namespace Hamakaze {
     public class HttpConnection : IDisposable {
         public IPEndPoint EndPoint { get; }
         public Stream Stream { get; }
 
-        public Socket Socket { get; }
-        public NetworkStream NetworkStream { get; }
-        public SslStream SslStream { get; }
+        private Socket Socket { get; }
 
         public string Host { get; }
         public bool IsSecure { get; }
@@ -24,6 +23,7 @@ namespace Hamakaze {
         public DateTimeOffset LastOperation { get; private set; } = DateTimeOffset.Now;
 
         public bool InUse { get; private set; }
+        public bool HasUpgraded { get; private set; }
 
         public HttpConnection(string host, IPEndPoint endPoint, bool secure) {
             Host = host ?? throw new ArgumentNullException(nameof(host));
@@ -39,19 +39,19 @@ namespace Hamakaze {
             };
             Socket.Connect(endPoint);
 
-            NetworkStream = new NetworkStream(Socket, true);
+            Stream stream = new NetworkStream(Socket, true);
 
             if(IsSecure) {
-                SslStream = new SslStream(NetworkStream, false, (s, ce, ch, e) => e == SslPolicyErrors.None, null);
-                Stream = SslStream;
-                SslStream.AuthenticateAsClient(
+                SslStream sslStream = new SslStream(stream, false, (s, ce, ch, e) => e == SslPolicyErrors.None, null);
+                Stream = sslStream;
+                sslStream.AuthenticateAsClient(
                     Host,
                     null,
                     SslProtocols.Tls11 | SslProtocols.Tls12 | SslProtocols.Tls13,
                     true
                 );
             } else
-                Stream = NetworkStream;
+                Stream = stream;
         }
 
         public void MarkUsed() {
@@ -61,11 +61,19 @@ namespace Hamakaze {
         }
 
         public bool Acquire() {
-            return !InUse && (InUse = true);
+            return !HasUpgraded && !InUse && (InUse = true);
         }
 
         public void Release() {
             InUse = false;
+        }
+
+        public WsConnection ToWebSocket() {
+            if(HasUpgraded)
+                throw new HttpConnectionAlreadyUpgradedException();
+            HasUpgraded = true;
+
+            return new WsConnection(Stream);
         }
 
         private bool IsDisposed;
@@ -79,7 +87,9 @@ namespace Hamakaze {
             if(IsDisposed)
                 return;
             IsDisposed = true;
-            Stream.Dispose();
+
+            if(!HasUpgraded)
+                Stream.Dispose();
         }
     }
 }

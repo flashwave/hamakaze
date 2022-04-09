@@ -1,13 +1,21 @@
 ﻿using Hamakaze.Headers;
+using Hamakaze.WebSocket;
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Hamakaze {
     public class HttpClient : IDisposable {
         public const string PRODUCT_STRING = @"HMKZ";
         public const string VERSION_MAJOR = @"1";
-        public const string VERSION_MINOR = @"0";
+        public const string VERSION_MINOR = @"1";
         public const string USER_AGENT = PRODUCT_STRING + @"/" + VERSION_MAJOR + @"." + VERSION_MINOR;
+
+        private const string WS_GUID = @"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+        private const string WS_PROTO = @"websocket";
+        private const int WS_RNG = 16;
 
         private static HttpClient InstanceValue { get; set; }
         public static HttpClient Instance {
@@ -47,7 +55,8 @@ namespace Hamakaze {
                 request.UserAgent = DefaultUserAgent;
             if(!request.HasHeader(HttpAcceptEncodingHeader.NAME))
                 request.AcceptedEncodings = AcceptedEncodings;
-            request.Connection = ReuseConnections ? HttpConnectionHeader.KEEP_ALIVE : HttpConnectionHeader.CLOSE;
+            if(!request.HasHeader(HttpConnectionHeader.NAME))
+                request.Connection = ReuseConnections ? HttpConnectionHeader.KEEP_ALIVE : HttpConnectionHeader.CLOSE;
 
             HttpTask task = new(Connections, request, disposeRequest, disposeResponse);
 
@@ -83,6 +92,84 @@ namespace Hamakaze {
             bool disposeResponse = true
         ) {
             RunTask(CreateTask(request, onComplete, onError, onCancel, onDownloadProgress, onUploadProgress, onStateChange, disposeRequest, disposeResponse));
+        }
+
+        public void CreateWsClient(
+            string url,
+            Action<WsClient> onOpen,
+            Action<WsMessage> onMessage,
+            Action<Exception> onError,
+            IEnumerable<string> protocols = null
+        ) {
+            CreateWsConnection(
+                url,
+                conn => onOpen(new WsClient(conn, onMessage, onError)),
+                onError,
+                protocols
+            );
+        }
+
+        public void CreateWsConnection(
+            string url,
+            Action<WsConnection> onOpen,
+            Action<Exception> onError,
+            IEnumerable<string> protocols = null
+        ) {
+            string key = Convert.ToBase64String(RandomNumberGenerator.GetBytes(WS_RNG));
+
+            HttpRequestMessage req = new HttpRequestMessage(@"GET", url);
+            req.Connection = HttpConnectionHeader.UPGRADE;
+            req.SetHeader(@"Cache-Control", @"no-cache");
+            req.SetHeader(@"Upgrade", WS_PROTO);
+            req.SetHeader(@"Sec-WebSocket-Key", key);
+            req.SetHeader(@"Sec-WebSocket-Version", @"13");
+
+            if(protocols?.Any() == true)
+                req.SetHeader(@"Sec-WebSocket-Protocol", string.Join(@", ", protocols));
+
+            SendRequest(
+                req,
+                (t, res) => {
+                    try {
+                        if(res.ProtocolVersion.CompareTo(@"1.1") < 0)
+                            throw new HttpUpgradeProtocolVersionException(@"1.1", res.ProtocolVersion);
+
+                        if(res.StatusCode != 101)
+                            throw new HttpUpgradeUnexpectedStatusException(res.StatusCode);
+
+                        if(res.Connection != HttpConnectionHeader.UPGRADE)
+                            throw new HttpUpgradeUnexpectedHeaderException(
+                                @"Connection",
+                                HttpConnectionHeader.UPGRADE,
+                                res.Connection
+                            );
+
+                        string hUpgrade = res.GetHeaderLine(@"Upgrade");
+                        if(hUpgrade != WS_PROTO)
+                            throw new HttpUpgradeUnexpectedHeaderException(@"Upgrade", WS_PROTO, hUpgrade);
+
+                        string serverHashStr = res.GetHeaderLine(@"Sec-WebSocket-Accept");
+                        byte[] expectHash = SHA1.HashData(Encoding.ASCII.GetBytes(key + WS_GUID));
+
+                        if(string.IsNullOrWhiteSpace(serverHashStr))
+                            throw new HttpUpgradeUnexpectedHeaderException(
+                                @"Sec-WebSocket-Accept",
+                                Convert.ToBase64String(expectHash),
+                                serverHashStr
+                            );
+
+                        byte[] givenHash = Convert.FromBase64String(serverHashStr.Trim());
+
+                        if(!expectHash.SequenceEqual(givenHash))
+                            throw new HttpUpgradeInvalidHashException(Convert.ToBase64String(expectHash), serverHashStr);
+
+                        onOpen(t.Connection.ToWebSocket());
+                    } catch(Exception ex) {
+                        onError(ex);
+                    }
+                },
+                (t, ex) => onError(ex)
+            );
         }
 
         public static void Send(
