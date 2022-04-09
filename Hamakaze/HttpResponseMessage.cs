@@ -151,7 +151,7 @@ namespace Hamakaze {
             if(line == null)
                 throw new IOException(@"Failed to read initial HTTP header.");
             if(!line.StartsWith(@"HTTP/"))
-                throw new IOException(@"Response is not a valid HTTP message.");
+                throw new IOException($@"Response is not a valid HTTP message: {line}.");
             string[] parts = line[5..].Split(' ', 3);
             if(!int.TryParse(parts.ElementAtOrDefault(1), out int statusCode))
                 throw new IOException(@"Invalid HTTP status code format.");
@@ -238,6 +238,8 @@ namespace Hamakaze {
                     readBuffer(chunkLength);
                     readLine();
                 }
+
+                readLine();
             } else if(contentLength != 0) {
                 body = new MemoryStream();
                 readBuffer(contentLength);
