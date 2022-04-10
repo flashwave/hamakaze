@@ -13,6 +13,9 @@ namespace Hamakaze {
 
         private Socket Socket { get; }
 
+        private NetworkStream NetworkStream { get; }
+        private SslStream SslStream { get; }
+
         public string Host { get; }
         public bool IsSecure { get; }
 
@@ -39,19 +42,19 @@ namespace Hamakaze {
             };
             Socket.Connect(endPoint);
 
-            Stream stream = new NetworkStream(Socket, true);
+            NetworkStream = new NetworkStream(Socket, true);
 
             if(IsSecure) {
-                SslStream sslStream = new SslStream(stream, false, (s, ce, ch, e) => e == SslPolicyErrors.None, null);
-                Stream = sslStream;
-                sslStream.AuthenticateAsClient(
+                SslStream = new SslStream(NetworkStream, false, (s, ce, ch, e) => e == SslPolicyErrors.None, null);
+                Stream = SslStream;
+                SslStream.AuthenticateAsClient(
                     Host,
                     null,
                     SslProtocols.Tls11 | SslProtocols.Tls12 | SslProtocols.Tls13,
                     true
                 );
             } else
-                Stream = stream;
+                Stream = NetworkStream;
         }
 
         public void MarkUsed() {
@@ -72,6 +75,9 @@ namespace Hamakaze {
             if(HasUpgraded)
                 throw new HttpConnectionAlreadyUpgradedException();
             HasUpgraded = true;
+
+            NetworkStream.ReadTimeout = -1;
+            SslStream.ReadTimeout = -1;
 
             return new WsConnection(Stream);
         }
