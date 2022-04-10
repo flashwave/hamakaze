@@ -8,7 +8,11 @@ namespace Hamakaze.WebSocket {
             Connection = conn ?? throw new ArgumentNullException(nameof(conn));
         }
 
-        //
+        public void SendPart(ReadOnlySpan<byte> data)
+            => Connection.WriteFrame(WsOpcode.DataBinary, data, false);
+
+        public void SendFinalPart(ReadOnlySpan<byte> data)
+            => Connection.WriteFrame(WsOpcode.DataBinary, data, true);
 
         private bool IsDisposed;
 
@@ -26,6 +30,7 @@ namespace Hamakaze.WebSocket {
                 return;
             IsDisposed = true;
 
+            Connection.EndBufferedSend();
         }
     }
 }

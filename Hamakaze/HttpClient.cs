@@ -99,38 +99,83 @@ namespace Hamakaze {
             Action<WsClient> onOpen,
             Action<WsMessage> onMessage,
             Action<Exception> onError,
-            IEnumerable<string> protocols = null
-        ) {
-            CreateWsConnection(
+            IEnumerable<string> protocols = null,
+            Action<HttpResponseMessage> onResponse = null,
+            bool disposeRequest = true,
+            bool disposeResponse = true
+        ) => CreateWsConnection(
                 url,
                 conn => onOpen(new WsClient(conn, onMessage, onError)),
                 onError,
-                protocols
+                protocols,
+                onResponse,
+                disposeRequest,
+                disposeResponse
             );
-        }
+
+        public void CreateWsClient(
+            HttpRequestMessage request,
+            Action<WsClient> onOpen,
+            Action<WsMessage> onMessage,
+            Action<Exception> onError,
+            IEnumerable<string> protocols = null,
+            Action<HttpResponseMessage> onResponse = null,
+            bool disposeRequest = true,
+            bool disposeResponse = true
+        ) => CreateWsConnection(
+                request,
+                conn => onOpen(new WsClient(conn, onMessage, onError)),
+                onError,
+                protocols,
+                onResponse,
+                disposeRequest,
+                disposeResponse
+            );
 
         public void CreateWsConnection(
             string url,
             Action<WsConnection> onOpen,
             Action<Exception> onError,
-            IEnumerable<string> protocols = null
+            IEnumerable<string> protocols = null,
+            Action<HttpResponseMessage> onResponse = null,
+            bool disposeRequest = true,
+            bool disposeResponse = true
+        ) => CreateWsConnection(
+                new HttpRequestMessage(@"GET", url),
+                onOpen,
+                onError,
+                protocols,
+                onResponse,
+                disposeRequest,
+                disposeResponse
+            );
+
+        public void CreateWsConnection(
+            HttpRequestMessage request,
+            Action<WsConnection> onOpen,
+            Action<Exception> onError,
+            IEnumerable<string> protocols = null,
+            Action<HttpResponseMessage> onResponse = null,
+            bool disposeRequest = true,
+            bool disposeResponse = true
         ) {
             string key = Convert.ToBase64String(RandomNumberGenerator.GetBytes(WS_RNG));
 
-            HttpRequestMessage req = new HttpRequestMessage(@"GET", url);
-            req.Connection = HttpConnectionHeader.UPGRADE;
-            req.SetHeader(@"Cache-Control", @"no-cache");
-            req.SetHeader(@"Upgrade", WS_PROTO);
-            req.SetHeader(@"Sec-WebSocket-Key", key);
-            req.SetHeader(@"Sec-WebSocket-Version", @"13");
+            request.Connection = HttpConnectionHeader.UPGRADE;
+            request.SetHeader(@"Cache-Control", @"no-cache");
+            request.SetHeader(@"Upgrade", WS_PROTO);
+            request.SetHeader(@"Sec-WebSocket-Key", key);
+            request.SetHeader(@"Sec-WebSocket-Version", @"13");
 
             if(protocols?.Any() == true)
-                req.SetHeader(@"Sec-WebSocket-Protocol", string.Join(@", ", protocols));
+                request.SetHeader(@"Sec-WebSocket-Protocol", string.Join(@", ", protocols));
 
             SendRequest(
-                req,
+                request,
                 (t, res) => {
                     try {
+                        onResponse?.Invoke(res);
+
                         if(res.ProtocolVersion.CompareTo(@"1.1") < 0)
                             throw new HttpUpgradeProtocolVersionException(@"1.1", res.ProtocolVersion);
 
@@ -168,7 +213,9 @@ namespace Hamakaze {
                         onError(ex);
                     }
                 },
-                (t, ex) => onError(ex)
+                (t, ex) => onError(ex),
+                disposeRequest: disposeRequest,
+                disposeResponse: disposeResponse
             );
         }
 
@@ -182,9 +229,57 @@ namespace Hamakaze {
             Action<HttpTask, HttpTask.TaskState> onStateChange = null,
             bool disposeRequest = true,
             bool disposeResponse = true
-        ) {
-            Instance.SendRequest(request, onComplete, onError, onCancel, onDownloadProgress, onUploadProgress, onStateChange, disposeRequest, disposeResponse);
-        }
+        ) => Instance.SendRequest(
+                request,
+                onComplete,
+                onError,
+                onCancel,
+                onDownloadProgress,
+                onUploadProgress,
+                onStateChange,
+                disposeRequest,
+                disposeResponse
+            );
+
+        public static void Connect(
+            string url,
+            Action<WsClient> onOpen,
+            Action<WsMessage> onMessage,
+            Action<Exception> onError,
+            IEnumerable<string> protocols = null,
+            Action<HttpResponseMessage> onResponse = null,
+            bool disposeRequest = true,
+            bool disposeResponse = true
+        ) => Instance.CreateWsClient(
+                url,
+                onOpen,
+                onMessage,
+                onError,
+                protocols,
+                onResponse,
+                disposeRequest,
+                disposeResponse
+            );
+
+        public static void Connect(
+            HttpRequestMessage request,
+            Action<WsClient> onOpen,
+            Action<WsMessage> onMessage,
+            Action<Exception> onError,
+            IEnumerable<string> protocols = null,
+            Action<HttpResponseMessage> onResponse = null,
+            bool disposeRequest = true,
+            bool disposeResponse = true
+        ) => Instance.CreateWsClient(
+                request,
+                onOpen,
+                onMessage,
+                onError,
+                protocols,
+                onResponse,
+                disposeRequest,
+                disposeResponse
+            );
 
         private bool IsDisposed;
         ~HttpClient()

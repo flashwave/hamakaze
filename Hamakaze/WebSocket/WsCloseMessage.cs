@@ -2,7 +2,7 @@ using System;
 using System.Text;
 
 namespace Hamakaze.WebSocket {
-    public class WsCloseMessage : WsMessage {
+    public class WsCloseMessage : WsMessage, IHasBinaryData {
         public WsCloseReason Reason { get; }
         public string ReasonPhrase { get; }
         public byte[] Data { get; }

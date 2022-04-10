@@ -26,4 +26,16 @@ namespace Hamakaze.WebSocket {
     public class WsInvalidControlFrameException : WsException {
         public WsInvalidControlFrameException(string variant) : base($@"An invalid WebSocket control frame was encountered: {variant}") { }
     }
+
+    public class WsClientMutexFailedException : WsException {
+        public WsClientMutexFailedException() : base(@"Failed to acquire send mutex.") { }
+    }
+
+    public class WsBufferedSendAlreadyActiveException : WsException {
+        public WsBufferedSendAlreadyActiveException() : base(@"A buffered websocket send is already in session.") { }
+    }
+
+    public class WsBufferedSendInSessionException : WsException {
+        public WsBufferedSendInSessionException() : base(@"Cannot send data while a buffered send is in session.") { }
+    }
 }

@@ -4,17 +4,6 @@ using System.Net.Security;
 using System.Security.Cryptography;
 using System.Text;
 
-// TODO: optimisations with newer .net feature to reduce memory copying
-//       i think we're generally aware of how much data we're shoving around
-//        so memorystream can be considered overkill
-
-// Should there be internal mutexing on the socket? (leaning towards no)
-
-// Should all external stream handling be moved to WsClient?
-//  - IDEA: Buffered send "session" class.
-//          Would require exposing the raw Write methods
-//           but i suppose that's what "internal" exists for
-
 namespace Hamakaze.WebSocket {
     public class WsConnection : IDisposable {
         public Stream Stream { get; }
@@ -22,12 +11,13 @@ namespace Hamakaze.WebSocket {
         public bool IsSecure { get; }
         public bool IsClosed { get; private set; }
 
-        private const int BUFFER_SIZE = 0x2000;
         private const byte MASK_FLAG = 0x80;
         private const int MASK_SIZE = 4;
 
-        private WsOpcode FragmentedType = 0;
-        private MemoryStream FragmentedStream;
+        private WsOpcode FragmentType = 0;
+        private MemoryStream FragmentStream;
+
+        private WsBufferedSend BufferedSend;
 
         public WsConnection(Stream stream) {
             Stream = stream ?? throw new ArgumentNullException(nameof(stream));
@@ -44,7 +34,7 @@ namespace Hamakaze.WebSocket {
                 throw new Exception(@"Was unable to read the requested amount of data.");
         }
 
-        private (WsOpcode opcode, long length, bool isFinal, byte[] mask) ReadFrameHeader() {
+        private (WsOpcode opcode, int length, bool isFinal, byte[] mask) ReadFrameHeader() {
             byte[] buffer = new byte[8];
             StrictRead(buffer, 0, 2);
 
@@ -81,7 +71,11 @@ namespace Hamakaze.WebSocket {
             // i seriously don't understand the rationale behind both
             //  having a framing system but then also supporting frame lengths
             //  of 2^63, feels like 2^16 per frame would be a fine max.
-            if(length < 0 || length > long.MaxValue)
+            // UPDATE: decided to put the max at 2^32-1
+            // it's still more than you should ever need for a single frame
+            //  and it makes working with the number within a .NET context
+            //  less of a bother.
+            if(length < 0 || length > int.MaxValue)
                 throw new WsInvalidFrameSizeException(length);
 
             byte[] mask = null;
@@ -91,32 +85,30 @@ namespace Hamakaze.WebSocket {
                 mask = buffer;
             }
 
-            return (opcode, length, isFinal, mask);
+            return (opcode, (int)length, isFinal, mask);
         }
 
-        private long ReadFrameBody(Stream target, long length, byte[] mask, long offset = 0) {
+        private int ReadFrameBody(byte[] target, int length, byte[] mask, int offset = 0) {
             if(target == null)
                 throw new ArgumentNullException(nameof(target));
-            if(!target.CanWrite)
-                throw new ArgumentException(@"Target stream is not writable.", nameof(target));
 
             bool isMasked = mask != null;
 
             int read;
-            int take = length > BUFFER_SIZE ? BUFFER_SIZE : (int)length;
-            byte[] buffer = new byte[take];
+            const int bufferSize = 0x1000;
+            int take = length > bufferSize ? bufferSize : (int)length;
 
             while(length > 0) {
-                read = Stream.Read(buffer, 0, take);
+                read = Stream.Read(target, offset, take);
 
                 if(isMasked)
-                    for(int i = 0; i < read; ++i)
-                        buffer[i] ^= mask[offset++ % MASK_SIZE];
+                    for(int i = 0; i < read; ++i) {
+                        int o = offset + i;
+                        target[o] ^= mask[o % MASK_SIZE];
+                    }
 
-                target.Write(buffer, 0, read);
-
-                offset += read;
                 length -= read;
+                offset += read;
 
                 if(take > length)
                     take = (int)length;
@@ -126,7 +118,7 @@ namespace Hamakaze.WebSocket {
         }
 
         private WsMessage ReadFrame() {
-            (WsOpcode opcode, long length, bool isFinal, byte[] mask) = ReadFrameHeader();
+            (WsOpcode opcode, int length, bool isFinal, byte[] mask) = ReadFrameHeader();
 
             if(opcode is not WsOpcode.DataContinue
                 and not WsOpcode.DataBinary
@@ -140,77 +132,55 @@ namespace Hamakaze.WebSocket {
             bool isContinue = opcode == WsOpcode.DataContinue;
             bool canFragment = (opcode & WsOpcode.CtrlClose) == 0;
 
-            MemoryStream bodyStream = null;
+            byte[] body = length < 1 ? null : new byte[length];
 
             if(hasBody) {
+                ReadFrameBody(body, length, mask);
+
                 if(canFragment) {
                     if(isContinue) {
-                        if(FragmentedType == 0)
+                        if(FragmentType == 0)
                             throw new WsUnexpectedContinueException();
 
-                        opcode = FragmentedType;
+                        opcode = FragmentType;
 
-                        if(FragmentedStream == null)
-                            FragmentedStream = bodyStream = new();
-                        else
-                            bodyStream = FragmentedStream;
+                        FragmentStream ??= new();
+                        FragmentStream.Write(body, 0, length);
                     } else {
-                        if(FragmentedType != 0)
+                        if(FragmentType != 0)
                             throw new WsUnexpectedDataException();
 
-                        if(isFinal)
-                            bodyStream = new();
-                        else {
-                            FragmentedType = opcode;
-                            FragmentedStream = bodyStream = new();
+                        if(!isFinal) {
+                            FragmentType = opcode;
+                            FragmentStream = new();
+                            FragmentStream.Write(body, 0, length);
                         }
                     }
-                } else
-                    bodyStream = new();
-
-                ReadFrameBody(bodyStream, length, mask);
+                }
             }
 
             WsMessage msg;
 
             if(isFinal) {
                 if(canFragment && isContinue) {
-                    FragmentedType = 0;
-                    FragmentedStream = null;
+                    FragmentType = 0;
+
+                    body = FragmentStream.ToArray();
+                    FragmentStream.Dispose();
+                    FragmentStream = null;
                 }
 
-                byte[] body = null;
+                msg = opcode switch {
+                    WsOpcode.DataText => new WsTextMessage(body),
+                    WsOpcode.DataBinary => new WsBinaryMessage(body),
 
-                if(bodyStream != null) {
-                    if(bodyStream.Length > 0)
-                        body = bodyStream.ToArray();
-                    bodyStream.Dispose();
-                }
+                    WsOpcode.CtrlClose => new WsCloseMessage(body),
+                    WsOpcode.CtrlPing => new WsPingMessage(body),
+                    WsOpcode.CtrlPong => new WsPongMessage(body),
 
-                switch(opcode) {
-                    case WsOpcode.DataText:
-                        msg = new WsTextMessage(body);
-                        break;
-
-                    case WsOpcode.DataBinary:
-                        msg = new WsBinaryMessage(body);
-                        break;
-
-                    case WsOpcode.CtrlClose:
-                        msg = new WsCloseMessage(body);
-                        break;
-
-                    case WsOpcode.CtrlPing:
-                        msg = new WsPingMessage(body);
-                        break;
-
-                    case WsOpcode.CtrlPong:
-                        msg = new WsPongMessage(body);
-                        break;
-
-                    default: // fallback, if we end up here something is very fucked
-                        throw new WsUnsupportedOpcodeException(opcode);
-                }
+                    // fallback, if we end up here something is very fucked
+                    _ => throw new WsUnsupportedOpcodeException(opcode),
+                };
             } else msg = null;
 
             return msg;
@@ -222,7 +192,10 @@ namespace Hamakaze.WebSocket {
             return msg;
         }
 
-        private void WriteFrameHeader(WsOpcode opcode, long length, bool isFinal, byte[] mask = null) {
+        private void WriteFrameHeader(WsOpcode opcode, int length, bool isFinal, byte[] mask = null) {
+            if(length < 0 || length > int.MaxValue)
+                throw new WsInvalidFrameSizeException(length);
+
             bool shouldMask = mask != null;
 
             if(isFinal)
@@ -247,9 +220,13 @@ namespace Hamakaze.WebSocket {
 
             if(shouldMask)
                 Stream.Write(mask, 0, MASK_SIZE);
+            Stream.Flush();
         }
 
-        private long WriteFrameBody(ReadOnlySpan<byte> body, byte[] mask = null, long offset = 0) {
+        private int WriteFrameBody(ReadOnlySpan<byte> body, byte[] mask = null, int offset = 0) {
+            if(body == null)
+                throw new ArgumentNullException(nameof(body));
+
             if(mask != null) {
                 byte[] masked = new byte[body.Length];
 
@@ -260,37 +237,34 @@ namespace Hamakaze.WebSocket {
             }
 
             Stream.Write(body);
+            Stream.Flush();
 
             return offset;
         }
 
-        private long WriteFrameBody(Stream body, byte[] mask = null, long offset = 0) {
-            bool shouldMask = mask != null;
+        internal void WriteFrame(WsOpcode opcode, ReadOnlySpan<byte> body, bool isFinal) {
+            if(body == null)
+                throw new ArgumentNullException(nameof(body));
 
-            int read;
-            byte[] buffer = new byte[BUFFER_SIZE];
-            while((read = body.Read(buffer, 0, BUFFER_SIZE)) > 0)
-                offset = WriteFrameBody(buffer.AsSpan(0, read), mask, offset);
-
-            return offset;
-        }
-
-        private void WriteFrame(WsOpcode opcode, ReadOnlySpan<byte> body, bool isFinal) {
             byte[] mask = GenerateMask();
             WriteFrameHeader(opcode, body.Length, isFinal, mask);
             if(body.Length > 0)
                 WriteFrameBody(body, mask);
-            Stream.Flush();
         }
 
-        private void Write(WsOpcode opcode, ReadOnlySpan<byte> body) {
-            if(body.Length > 0xFFFF) {
-                WriteFrame(opcode, body.Slice(0, 0xFFFF), false);
-                body = body.Slice(0xFFFF);
+        private void WriteData(WsOpcode opcode, ReadOnlySpan<byte> body) {
+            if(body == null)
+                throw new ArgumentNullException(nameof(body));
+            if(BufferedSend != null)
+                throw new WsBufferedSendInSessionException();
 
-                while(body.Length > 0xFFFF) {
-                    WriteFrame(WsOpcode.DataContinue, body.Slice(0, 0xFFFF), false);
-                    body = body.Slice(0xFFFF);
+            if(body.Length > ushort.MaxValue) {
+                WriteFrame(opcode, body.Slice(0, ushort.MaxValue), false);
+                body = body.Slice(ushort.MaxValue);
+
+                while(body.Length > ushort.MaxValue) {
+                    WriteFrame(WsOpcode.DataContinue, body.Slice(0, ushort.MaxValue), false);
+                    body = body.Slice(ushort.MaxValue);
                 }
 
                 WriteFrame(WsOpcode.DataContinue, body, true);
@@ -298,119 +272,74 @@ namespace Hamakaze.WebSocket {
                 WriteFrame(opcode, body, true);
         }
 
-        private void Write(WsOpcode opcode, Stream stream) {
-            if(stream == null)
-                throw new ArgumentNullException(nameof(stream));
-            if(!stream.CanRead)
-                throw new ArgumentException(@"Provided stream cannot be read.", nameof(stream));
-
-            int read;
-            byte[] buffer = new byte[BUFFER_SIZE];
-
-            while((read = stream.Read(buffer, 0, BUFFER_SIZE)) > 0) {
-                WriteFrame(opcode, buffer.AsSpan(0, read), false);
-
-                if(opcode != WsOpcode.DataContinue)
-                    opcode = WsOpcode.DataContinue;
-            }
-
-            // this kinda fucking sucks
-            WriteFrame(WsOpcode.CtrlClose, ReadOnlySpan<byte>.Empty, true);
-        }
-
-        private void Write(WsOpcode opcode, Stream stream, int length) {
-            if(stream == null)
-                throw new ArgumentNullException(nameof(stream));
-            if(!stream.CanRead)
-                throw new ArgumentException(@"Provided stream cannot be read.", nameof(stream));
-
-            int read;
-            byte[] buffer = new byte[BUFFER_SIZE];
-
-            if(length > BUFFER_SIZE) {
-                int take = BUFFER_SIZE;
-
-                while((read = stream.Read(buffer, 0, take)) > 0) {
-                    WriteFrame(opcode, buffer.AsSpan(0, read), false);
-
-                    if(opcode != WsOpcode.DataContinue)
-                        opcode = WsOpcode.DataContinue;
-
-                    length -= read;
-                    if(take > length)
-                        take = length;
-                }
-
-                // feel like there'd be a better way to do this
-                //  but i feel like assuming that any successful read with something
-                //  still coming (read == BUFFER_SIZE) will bite me in the ass later somehow
-                WriteFrame(WsOpcode.CtrlClose, Span<byte>.Empty, true);
-            } else {
-                read = stream.Read(buffer, 0, BUFFER_SIZE);
-                if(read > 0)
-                    WriteFrame(WsOpcode.DataBinary, buffer.AsSpan(0, read), true);
-            }
-        }
-
         public void Send(string text)
-            => Write(WsOpcode.DataText, Encoding.UTF8.GetBytes(text));
+            => WriteData(WsOpcode.DataText, Encoding.UTF8.GetBytes(text));
 
         public void Send(ReadOnlySpan<byte> buffer)
-            => Write(WsOpcode.DataBinary, buffer);
+            => WriteData(WsOpcode.DataBinary, buffer);
 
-        public void Send(Stream source)
-            => Write(WsOpcode.DataBinary, source);
-
-        public void Send(Stream source, int count)
-            => Write(WsOpcode.DataBinary, source, count);
-
-        private void WriteControlFrame(WsOpcode opcode) {
-            WriteFrameHeader(opcode, 0, true, GenerateMask());
-            Stream.Flush();
+        public WsBufferedSend BeginBufferedSend() {
+            if(BufferedSend != null)
+                throw new WsBufferedSendAlreadyActiveException();
+            return BufferedSend = new(this);
         }
 
-        private void WriteControlFrame(WsOpcode opcode, ReadOnlySpan<byte> buffer) {
+        // this method should only be called from within WsBufferedSend.Dispose
+        internal void EndBufferedSend() {
+            BufferedSend = null;
+        }
+
+        private void WriteControl(WsOpcode opcode)
+            => WriteFrameHeader(opcode, 0, true, GenerateMask());
+
+        private void WriteControl(WsOpcode opcode, ReadOnlySpan<byte> buffer) {
+            if(buffer == null)
+                throw new ArgumentNullException(nameof(buffer));
             if(buffer.Length > 125)
                 throw new ArgumentException(@"Data may not be more than 125 bytes.", nameof(buffer));
 
             byte[] mask = GenerateMask();
             WriteFrameHeader(opcode, buffer.Length, true, mask);
             WriteFrameBody(buffer, mask);
-            Stream.Flush();
         }
 
         public void Ping()
-            => WriteControlFrame(WsOpcode.CtrlPing);
+            => WriteControl(WsOpcode.CtrlPing);
 
         public void Ping(ReadOnlySpan<byte> buffer)
-            => WriteControlFrame(WsOpcode.CtrlPing, buffer);
+            => WriteControl(WsOpcode.CtrlPing, buffer);
 
         public void Pong()
-            => WriteControlFrame(WsOpcode.CtrlPong);
+            => WriteControl(WsOpcode.CtrlPong);
 
         public void Pong(ReadOnlySpan<byte> buffer)
-            => WriteControlFrame(WsOpcode.CtrlPong, buffer);
+            => WriteControl(WsOpcode.CtrlPong, buffer);
 
         public void CloseEmpty() {
             if(IsClosed)
                 return;
             IsClosed = true;
 
-            WriteControlFrame(WsOpcode.CtrlClose);
+            WriteControl(WsOpcode.CtrlClose);
         }
 
         public void Close(ReadOnlySpan<byte> buffer) {
+            if(buffer == null)
+                throw new ArgumentNullException(nameof(buffer));
+
             if(IsClosed)
                 return;
             IsClosed = true;
 
-            WriteControlFrame(WsOpcode.CtrlClose, buffer);
+            WriteControl(WsOpcode.CtrlClose, buffer);
         }
 
         public void Close(WsCloseReason code)
             => Close(WsUtils.FromU16((ushort)code));
 
         public void Close(WsCloseReason code, ReadOnlySpan<byte> reason) {
+            if(reason == null)
+                throw new ArgumentNullException(nameof(reason));
             if(reason.Length > 123)
                 throw new ArgumentException(@"Reason may not be more than 123 bytes.", nameof(reason));
 
@@ -422,14 +351,11 @@ namespace Hamakaze.WebSocket {
             WriteFrameHeader(WsOpcode.CtrlClose, 2 + reason.Length, true, mask);
             WriteFrameBody(WsUtils.FromU16((ushort)code), mask);
             WriteFrameBody(reason, mask, 2);
-            Stream.Flush();
         }
 
         public void Close(WsCloseReason code, string reason) {
-            if(string.IsNullOrEmpty(reason)) {
-                Close(code);
-                return;
-            }
+            if(reason == null)
+                throw new ArgumentNullException(nameof(reason));
 
             int length = Encoding.UTF8.GetByteCount(reason);
             if(length > 123)
@@ -443,7 +369,6 @@ namespace Hamakaze.WebSocket {
             WriteFrameHeader(WsOpcode.CtrlClose, 2 + reason.Length, true, mask);
             WriteFrameBody(WsUtils.FromU16((ushort)code), mask);
             WriteFrameBody(Encoding.UTF8.GetBytes(reason), mask, 2);
-            Stream.Flush();
         }
 
         private bool IsDisposed;
@@ -462,6 +387,8 @@ namespace Hamakaze.WebSocket {
                 return;
             IsDisposed = true;
 
+            BufferedSend?.Dispose();
+            FragmentStream?.Dispose();
             Stream.Dispose();
         }
     }

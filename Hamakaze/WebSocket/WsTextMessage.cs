@@ -10,5 +10,11 @@ namespace Hamakaze.WebSocket {
             else
                 Text = string.Empty;
         }
+
+        public static implicit operator string(WsTextMessage msg) => msg.Text;
+
+        public override string ToString() {
+            return Text;
+        }
     }
 }
